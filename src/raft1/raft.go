@@ -39,13 +39,14 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 
-	state       role
-	currentTerm int
-	votedFor    int
-	log         []LogEntry
-	commitIndex int
-	lastApplied int
-	applyCh     chan raftapi.ApplyMsg
+	state            role
+	currentTerm      int
+	votedFor         int
+	log              []LogEntry
+	commitIndex      int
+	lastApplied      int
+	applyCh          chan raftapi.ApplyMsg
+	electionDeadline time.Time
 }
 
 // return currentTerm and whether this server
@@ -129,7 +130,33 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.VoteGranted = false
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = follower
+	}
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		return
+	}
+
+	lastIndex := len(rf.log) - 1
+	lastTerm := rf.log[lastIndex].Term
+	upToDate := args.LastLogTerm > lastTerm ||
+		(args.LastLogTerm == lastTerm && args.LastLogIndex >= lastIndex)
+	if upToDate && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
+		rf.resetElectionDeadline()
+	}
+}
+
+func (rf *Raft) resetElectionDeadline() {
+	rf.electionDeadline = time.Now().Add(time.Duration(450+rand.Intn(300)) * time.Millisecond)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -217,6 +244,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.resetElectionDeadline()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
