@@ -39,14 +39,15 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 
-	state            role
-	currentTerm      int
-	votedFor         int
-	log              []LogEntry
-	commitIndex      int
-	lastApplied      int
-	applyCh          chan raftapi.ApplyMsg
-	electionDeadline time.Time
+	state             role
+	currentTerm       int
+	votedFor          int
+	log               []LogEntry
+	commitIndex       int
+	lastApplied       int
+	applyCh           chan raftapi.ApplyMsg
+	electionDeadline  time.Time
+	heartbeatDeadline time.Time
 }
 
 // return currentTerm and whether this server
@@ -135,9 +136,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.VoteGranted = false
 	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.votedFor = -1
-		rf.state = follower
+		rf.becomeFollower(args.Term)
 	}
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -157,6 +156,107 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) resetElectionDeadline() {
 	rf.electionDeadline = time.Now().Add(time.Duration(450+rand.Intn(300)) * time.Millisecond)
+}
+
+func (rf *Raft) becomeFollower(term int) {
+	if term > rf.currentTerm {
+		rf.currentTerm = term
+		rf.votedFor = -1
+	}
+	rf.state = follower
+}
+
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Success = false
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
+	}
+	rf.becomeFollower(args.Term)
+	rf.resetElectionDeadline()
+	reply.Term = rf.currentTerm
+	reply.Success = true
+}
+
+func (rf *Raft) startElection() {
+	rf.state = candidate
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.resetElectionDeadline()
+	lastIndex := len(rf.log) - 1
+	args := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: lastIndex,
+		LastLogTerm:  rf.log[lastIndex].Term,
+	}
+	votes := 1
+	if votes > len(rf.peers)/2 {
+		rf.state = leader
+		rf.heartbeatDeadline = time.Time{}
+		return
+	}
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(server int) {
+			reply := RequestVoteReply{}
+			if !rf.sendRequestVote(server, &args, &reply) {
+				return
+			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.Term > rf.currentTerm {
+				rf.becomeFollower(reply.Term)
+				rf.resetElectionDeadline()
+				return
+			}
+			if rf.state != candidate || rf.currentTerm != args.Term || !reply.VoteGranted {
+				return
+			}
+			votes++
+			if votes > len(rf.peers)/2 {
+				rf.state = leader
+				rf.heartbeatDeadline = time.Time{}
+			}
+		}(peer)
+	}
+}
+
+func (rf *Raft) sendHeartbeats() {
+	rf.heartbeatDeadline = time.Now().Add(120 * time.Millisecond)
+	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(server int) {
+			reply := AppendEntriesReply{}
+			if !rf.peers[server].Call("Raft.AppendEntries", &args, &reply) {
+				return
+			}
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+			if reply.Term > rf.currentTerm {
+				rf.becomeFollower(reply.Term)
+				rf.resetElectionDeadline()
+			}
+		}(peer)
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -209,15 +309,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) ticker() {
-	for true {
-
-		// Your code here (3A)
-		// Check if a leader election should be started.
-
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+	for {
+		rf.mu.Lock()
+		if rf.state == leader {
+			if !time.Now().Before(rf.heartbeatDeadline) {
+				rf.sendHeartbeats()
+			}
+		} else if !time.Now().Before(rf.electionDeadline) {
+			rf.startElection()
+		}
+		rf.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
