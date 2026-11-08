@@ -178,8 +178,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -187,6 +189,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	reply.Success = false
+	reply.ConflictTerm = -1
+	reply.ConflictIndex = len(rf.log)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		return
@@ -194,7 +198,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.becomeFollower(args.Term)
 	rf.resetElectionDeadline()
 	reply.Term = rf.currentTerm
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) {
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+		reply.ConflictIndex = args.PrevLogIndex
+		for reply.ConflictIndex > 0 && rf.log[reply.ConflictIndex-1].Term == reply.ConflictTerm {
+			reply.ConflictIndex--
+		}
 		return
 	}
 	for i, entry := range args.Entries {
@@ -284,35 +296,44 @@ func (rf *Raft) broadcastAppendEntries() {
 }
 
 func (rf *Raft) replicateTo(peer int) {
-	rf.mu.Lock()
-	if rf.state != leader {
+	for {
+		rf.mu.Lock()
+		if rf.state != leader {
+			rf.mu.Unlock()
+			return
+		}
+		next := rf.nextIndex[peer]
+		args := AppendEntriesArgs{
+			Term:         rf.currentTerm,
+			LeaderId:     rf.me,
+			PrevLogIndex: next - 1,
+			PrevLogTerm:  rf.log[next-1].Term,
+			Entries:      append([]LogEntry(nil), rf.log[next:]...),
+			LeaderCommit: rf.commitIndex,
+		}
 		rf.mu.Unlock()
-		return
-	}
-	next := rf.nextIndex[peer]
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: next - 1,
-		PrevLogTerm:  rf.log[next-1].Term,
-		Entries:      append([]LogEntry(nil), rf.log[next:]...),
-		LeaderCommit: rf.commitIndex,
-	}
-	rf.mu.Unlock()
 
-	reply := AppendEntriesReply{}
-	if !rf.peers[peer].Call("Raft.AppendEntries", &args, &reply) {
-		return
+		reply := AppendEntriesReply{}
+		if !rf.peers[peer].Call("Raft.AppendEntries", &args, &reply) {
+			return
+		}
+		rf.mu.Lock()
+		retry := rf.handleAppendReply(peer, &args, &reply)
+		rf.mu.Unlock()
+		if !retry {
+			return
+		}
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+}
+
+func (rf *Raft) handleAppendReply(peer int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	if reply.Term > rf.currentTerm {
 		rf.becomeFollower(reply.Term)
 		rf.resetElectionDeadline()
-		return
+		return false
 	}
 	if rf.state != leader || rf.currentTerm != args.Term {
-		return
+		return false
 	}
 	if reply.Success {
 		match := args.PrevLogIndex + len(args.Entries)
@@ -321,9 +342,29 @@ func (rf *Raft) replicateTo(peer int) {
 			rf.nextIndex[peer] = match + 1
 		}
 		rf.advanceCommit()
-	} else if rf.nextIndex[peer] == next && next > rf.matchIndex[peer]+1 {
-		rf.nextIndex[peer]--
+		return false
 	}
+	next := args.PrevLogIndex + 1
+	if rf.nextIndex[peer] != next || next <= rf.matchIndex[peer]+1 {
+		return false
+	}
+	backup := reply.ConflictIndex
+	if reply.ConflictTerm >= 0 {
+		for index := len(rf.log) - 1; index > 0; index-- {
+			if rf.log[index].Term == reply.ConflictTerm {
+				backup = index + 1
+				break
+			}
+		}
+	}
+	if backup >= next {
+		backup = next - 1
+	}
+	if backup < rf.matchIndex[peer]+1 {
+		backup = rf.matchIndex[peer] + 1
+	}
+	rf.nextIndex[peer] = backup
+	return true
 }
 
 func (rf *Raft) advanceCommit() {
