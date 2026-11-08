@@ -43,6 +43,8 @@ type Raft struct {
 	currentTerm       int
 	votedFor          int
 	log               []LogEntry
+	nextIndex         []int
+	matchIndex        []int
 	commitIndex       int
 	lastApplied       int
 	applyCh           chan raftapi.ApplyMsg
@@ -167,8 +169,11 @@ func (rf *Raft) becomeFollower(term int) {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
 }
 
 type AppendEntriesReply struct {
@@ -188,7 +193,32 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.becomeFollower(args.Term)
 	rf.resetElectionDeadline()
 	reply.Term = rf.currentTerm
+	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		return
+	}
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + 1 + i
+		if index >= len(rf.log) {
+			rf.log = append(rf.log, args.Entries[i:]...)
+			break
+		}
+		if rf.log[index].Term != entry.Term {
+			rf.log = append(rf.log[:index], args.Entries[i:]...)
+			break
+		}
+	}
 	reply.Success = true
+}
+
+func (rf *Raft) becomeLeader() {
+	rf.state = leader
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	for peer := range rf.peers {
+		rf.nextIndex[peer] = len(rf.log)
+	}
+	rf.matchIndex[rf.me] = len(rf.log) - 1
+	rf.heartbeatDeadline = time.Time{}
 }
 
 func (rf *Raft) startElection() {
@@ -205,8 +235,7 @@ func (rf *Raft) startElection() {
 	}
 	votes := 1
 	if votes > len(rf.peers)/2 {
-		rf.state = leader
-		rf.heartbeatDeadline = time.Time{}
+		rf.becomeLeader()
 		return
 	}
 	for peer := range rf.peers {
@@ -230,32 +259,60 @@ func (rf *Raft) startElection() {
 			}
 			votes++
 			if votes > len(rf.peers)/2 {
-				rf.state = leader
-				rf.heartbeatDeadline = time.Time{}
+				rf.becomeLeader()
 			}
 		}(peer)
 	}
 }
 
-func (rf *Raft) sendHeartbeats() {
+func (rf *Raft) broadcastAppendEntries() {
 	rf.heartbeatDeadline = time.Now().Add(120 * time.Millisecond)
-	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		go func(server int) {
-			reply := AppendEntriesReply{}
-			if !rf.peers[server].Call("Raft.AppendEntries", &args, &reply) {
-				return
-			}
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if reply.Term > rf.currentTerm {
-				rf.becomeFollower(reply.Term)
-				rf.resetElectionDeadline()
-			}
-		}(peer)
+		go rf.replicateTo(peer)
+	}
+}
+
+func (rf *Raft) replicateTo(peer int) {
+	rf.mu.Lock()
+	if rf.state != leader {
+		rf.mu.Unlock()
+		return
+	}
+	next := rf.nextIndex[peer]
+	args := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: next - 1,
+		PrevLogTerm:  rf.log[next-1].Term,
+		Entries:      append([]LogEntry(nil), rf.log[next:]...),
+	}
+	rf.mu.Unlock()
+
+	reply := AppendEntriesReply{}
+	if !rf.peers[peer].Call("Raft.AppendEntries", &args, &reply) {
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reply.Term > rf.currentTerm {
+		rf.becomeFollower(reply.Term)
+		rf.resetElectionDeadline()
+		return
+	}
+	if rf.state != leader || rf.currentTerm != args.Term {
+		return
+	}
+	if reply.Success {
+		match := args.PrevLogIndex + len(args.Entries)
+		if match > rf.matchIndex[peer] {
+			rf.matchIndex[peer] = match
+			rf.nextIndex[peer] = match + 1
+		}
+	} else if rf.nextIndex[peer] == next && next > rf.matchIndex[peer]+1 {
+		rf.nextIndex[peer]--
 	}
 }
 
@@ -305,7 +362,15 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return -1, rf.currentTerm, false
+	if rf.state != leader {
+		return -1, rf.currentTerm, false
+	}
+	index := len(rf.log)
+	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.matchIndex[rf.me] = index
+	rf.nextIndex[rf.me] = index + 1
+	rf.broadcastAppendEntries()
+	return index, rf.currentTerm, true
 }
 
 func (rf *Raft) ticker() {
@@ -313,7 +378,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		if rf.state == leader {
 			if !time.Now().Before(rf.heartbeatDeadline) {
-				rf.sendHeartbeats()
+				rf.broadcastAppendEntries()
 			}
 		} else if !time.Now().Before(rf.electionDeadline) {
 			rf.startElection()

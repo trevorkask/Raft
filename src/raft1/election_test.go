@@ -23,7 +23,7 @@ func TestHeartbeatTerms(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deadline := time.Now().Add(-time.Second)
-			rf := &Raft{currentTerm: 3, state: candidate, votedFor: 0, electionDeadline: deadline}
+			rf := &Raft{currentTerm: 3, state: candidate, votedFor: 0, electionDeadline: deadline, log: []LogEntry{{Term: 0}}}
 			args := AppendEntriesArgs{Term: tt.term, LeaderId: 1}
 			reply := AppendEntriesReply{Success: true}
 			rf.AppendEntries(&args, &reply)
