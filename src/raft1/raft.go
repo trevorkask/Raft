@@ -174,6 +174,7 @@ type AppendEntriesArgs struct {
 	PrevLogIndex int
 	PrevLogTerm  int
 	Entries      []LogEntry
+	LeaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -206,6 +207,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = append(rf.log[:index], args.Entries[i:]...)
 			break
 		}
+	}
+	commit := args.LeaderCommit
+	if last := args.PrevLogIndex + len(args.Entries); commit > last {
+		commit = last
+	}
+	if commit > rf.commitIndex {
+		rf.commitIndex = commit
 	}
 	reply.Success = true
 }
@@ -288,6 +296,7 @@ func (rf *Raft) replicateTo(peer int) {
 		PrevLogIndex: next - 1,
 		PrevLogTerm:  rf.log[next-1].Term,
 		Entries:      append([]LogEntry(nil), rf.log[next:]...),
+		LeaderCommit: rf.commitIndex,
 	}
 	rf.mu.Unlock()
 
@@ -311,8 +320,55 @@ func (rf *Raft) replicateTo(peer int) {
 			rf.matchIndex[peer] = match
 			rf.nextIndex[peer] = match + 1
 		}
+		rf.advanceCommit()
 	} else if rf.nextIndex[peer] == next && next > rf.matchIndex[peer]+1 {
 		rf.nextIndex[peer]--
+	}
+}
+
+func (rf *Raft) advanceCommit() {
+	if rf.state != leader {
+		return
+	}
+	for index := len(rf.log) - 1; index > rf.commitIndex; index-- {
+		if rf.log[index].Term != rf.currentTerm {
+			continue
+		}
+		votes := 0
+		for _, match := range rf.matchIndex {
+			if match >= index {
+				votes++
+			}
+		}
+		if votes > len(rf.peers)/2 {
+			rf.commitIndex = index
+			return
+		}
+	}
+}
+
+func (rf *Raft) applyCommitted() {
+	for {
+		rf.mu.Lock()
+		if rf.lastApplied >= rf.commitIndex {
+			rf.mu.Unlock()
+			return
+		}
+		rf.lastApplied++
+		msg := raftapi.ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[rf.lastApplied].Command,
+			CommandIndex: rf.lastApplied,
+		}
+		rf.mu.Unlock()
+		rf.applyCh <- msg
+	}
+}
+
+func (rf *Raft) applier() {
+	for {
+		rf.applyCommitted()
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -369,6 +425,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
+	rf.advanceCommit()
 	rf.broadcastAppendEntries()
 	return index, rf.currentTerm, true
 }
@@ -415,6 +472,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applier()
 
 	return rf
 }
