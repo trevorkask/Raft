@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"6.5840/labrpc"
+	"6.5840/tester1"
 )
 
 func TestAppendEntriesLogs(t *testing.T) {
@@ -59,7 +60,7 @@ func TestAppendEntriesLogs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rf := &Raft{currentTerm: 3, votedFor: -1, log: append([]LogEntry(nil), base...)}
+			rf := &Raft{persister: tester.MakePersister(), currentTerm: 3, votedFor: -1, log: append([]LogEntry(nil), base...)}
 			for attempt := 0; attempt < 2; attempt++ {
 				reply := AppendEntriesReply{}
 				rf.AppendEntries(&tt.args, &reply)
@@ -75,7 +76,7 @@ func TestAppendEntriesLogs(t *testing.T) {
 }
 
 func TestStartAppends(t *testing.T) {
-	rf := &Raft{peers: make([]*labrpc.ClientEnd, 1), currentTerm: 3, log: []LogEntry{{Term: 0}}}
+	rf := &Raft{persister: tester.MakePersister(), peers: make([]*labrpc.ClientEnd, 1), currentTerm: 3, log: []LogEntry{{Term: 0}}}
 	if index, term, ok := rf.Start("rejected"); index != -1 || term != 3 || ok || len(rf.log) != 1 {
 		t.Fatal("follower accepted a command")
 	}
@@ -114,13 +115,14 @@ func TestReplicateFollower(t *testing.T) {
 	network := labrpc.MakeNetwork()
 	defer network.Cleanup()
 	end := network.MakeEnd("leader-follower")
-	f := &Raft{currentTerm: 2, votedFor: -1, log: []LogEntry{{Term: 0}}}
+	f := &Raft{persister: tester.MakePersister(), currentTerm: 2, votedFor: -1, log: []LogEntry{{Term: 0}}}
 	server := labrpc.MakeServer()
 	server.AddService(labrpc.MakeService(f))
 	network.AddServer("follower", server)
 	network.Connect("leader-follower", "follower")
 	network.Enable("leader-follower", true)
 	rf := &Raft{
+		persister:   tester.MakePersister(),
 		peers:       []*labrpc.ClientEnd{nil, end},
 		currentTerm: 3,
 		log:         []LogEntry{{Term: 0}, {Term: 1, Command: "a"}, {Term: 2, Command: "b"}},

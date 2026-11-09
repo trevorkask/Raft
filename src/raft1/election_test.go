@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"6.5840/labrpc"
+	"6.5840/tester1"
 )
 
 func TestHeartbeatTerms(t *testing.T) {
@@ -23,7 +24,7 @@ func TestHeartbeatTerms(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deadline := time.Now().Add(-time.Second)
-			rf := &Raft{currentTerm: 3, state: candidate, votedFor: 0, electionDeadline: deadline, log: []LogEntry{{Term: 0}}}
+			rf := &Raft{persister: tester.MakePersister(), currentTerm: 3, state: candidate, votedFor: 0, electionDeadline: deadline, log: []LogEntry{{Term: 0}}}
 			args := AppendEntriesArgs{Term: tt.term, LeaderId: 1}
 			reply := AppendEntriesReply{Success: true}
 			rf.AppendEntries(&args, &reply)
@@ -47,10 +48,11 @@ func TestHeartbeatTerms(t *testing.T) {
 
 func TestSinglePeerElection(t *testing.T) {
 	rf := &Raft{
-		peers:    make([]*labrpc.ClientEnd, 1),
-		state:    follower,
-		votedFor: -1,
-		log:      []LogEntry{{Term: 0}},
+		persister: tester.MakePersister(),
+		peers:     make([]*labrpc.ClientEnd, 1),
+		state:     follower,
+		votedFor:  -1,
+		log:       []LogEntry{{Term: 0}},
 	}
 	rf.mu.Lock()
 	rf.startElection()

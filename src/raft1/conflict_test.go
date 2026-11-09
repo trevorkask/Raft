@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"6.5840/labrpc"
+	"6.5840/tester1"
 )
 
 func TestConflictRecovery(t *testing.T) {
@@ -32,13 +33,13 @@ func TestConflictRecovery(t *testing.T) {
 			network := labrpc.MakeNetwork()
 			defer network.Cleanup()
 			end := network.MakeEnd("replication")
-			f := &Raft{currentTerm: 5, votedFor: -1, log: tt.followerLog}
+			f := &Raft{persister: tester.MakePersister(), currentTerm: 5, votedFor: -1, log: tt.followerLog}
 			server := labrpc.MakeServer()
 			server.AddService(labrpc.MakeService(f))
 			network.AddServer("follower", server)
 			network.Connect("replication", "follower")
 			network.Enable("replication", true)
-			rf := &Raft{peers: []*labrpc.ClientEnd{nil, end}, currentTerm: 5, log: tt.leaderLog}
+			rf := &Raft{persister: tester.MakePersister(), peers: []*labrpc.ClientEnd{nil, end}, currentTerm: 5, log: tt.leaderLog}
 			rf.becomeLeader()
 			rf.replicateTo(1)
 			f.mu.Lock()
@@ -135,8 +136,9 @@ func TestAppendReplyOrdering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rf := &Raft{
-				peers: make([]*labrpc.ClientEnd, 3),
-				state: leader, currentTerm: 5, votedFor: 0,
+				persister: tester.MakePersister(),
+				peers:     make([]*labrpc.ClientEnd, 3),
+				state:     leader, currentTerm: 5, votedFor: 0,
 				log:        []LogEntry{{Term: 0}, {Term: 1}, {Term: 1}, {Term: 2}, {Term: 2}, {Term: 4}, {Term: 4}},
 				nextIndex:  []int{7, tt.next, 7},
 				matchIndex: []int{6, tt.match, 0},

@@ -8,12 +8,12 @@ package raft
 // raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -69,34 +69,28 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.log) != nil {
+		panic("cannot encode Raft state")
+	}
+	rf.persister.Save(w.Bytes(), nil)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) == 0 {
 		return
 	}
-	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	d := labgob.NewDecoder(bytes.NewBuffer(data))
+	var term, votedFor int
+	var entries []LogEntry
+	if d.Decode(&term) != nil || d.Decode(&votedFor) != nil || d.Decode(&entries) != nil {
+		panic("cannot decode Raft state")
+	}
+	rf.currentTerm = term
+	rf.votedFor = votedFor
+	rf.log = entries
 }
 
 // how many bytes in Raft's persisted log?
@@ -150,7 +144,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	upToDate := args.LastLogTerm > lastTerm ||
 		(args.LastLogTerm == lastTerm && args.LastLogIndex >= lastIndex)
 	if upToDate && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
-		rf.votedFor = args.CandidateId
+		if rf.votedFor != args.CandidateId {
+			rf.votedFor = args.CandidateId
+			rf.persist()
+		}
 		reply.VoteGranted = true
 		rf.resetElectionDeadline()
 	}
@@ -164,6 +161,7 @@ func (rf *Raft) becomeFollower(term int) {
 	if term > rf.currentTerm {
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist()
 	}
 	rf.state = follower
 }
@@ -213,10 +211,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		index := args.PrevLogIndex + 1 + i
 		if index >= len(rf.log) {
 			rf.log = append(rf.log, args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 		if rf.log[index].Term != entry.Term {
 			rf.log = append(rf.log[:index], args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -245,6 +245,7 @@ func (rf *Raft) startElection() {
 	rf.state = candidate
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.resetElectionDeadline()
 	lastIndex := len(rf.log) - 1
 	args := RequestVoteArgs{
@@ -464,6 +465,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	index := len(rf.log)
 	rf.log = append(rf.log, LogEntry{Term: rf.currentTerm, Command: command})
+	rf.persist()
 	rf.matchIndex[rf.me] = index
 	rf.nextIndex[rf.me] = index + 1
 	rf.advanceCommit()

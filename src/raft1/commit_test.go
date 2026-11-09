@@ -6,6 +6,7 @@ import (
 
 	"6.5840/labrpc"
 	"6.5840/raftapi"
+	"6.5840/tester1"
 )
 
 func TestCommitMajority(t *testing.T) {
@@ -30,6 +31,7 @@ func TestCommitMajority(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rf := &Raft{
+				persister:   tester.MakePersister(),
 				peers:       make([]*labrpc.ClientEnd, len(tt.matches)),
 				state:       tt.state,
 				currentTerm: tt.term,
@@ -63,6 +65,7 @@ func TestFollowerCommitBounds(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rf := &Raft{
+				persister:   tester.MakePersister(),
 				currentTerm: 3,
 				log:         []LogEntry{{Term: 0}, {Term: 1}, {Term: 2}, {Term: 3}},
 				commitIndex: tt.committed,
@@ -79,6 +82,7 @@ func TestFollowerCommitBounds(t *testing.T) {
 func TestApplyCommittedOrder(t *testing.T) {
 	applyCh := make(chan raftapi.ApplyMsg)
 	rf := &Raft{
+		persister:   tester.MakePersister(),
 		currentTerm: 3,
 		log:         []LogEntry{{Term: 0}, {Term: 1, Command: "a"}, {Term: 2, Command: "b"}, {Term: 3, Command: "c"}, {Term: 3, Command: "uncommitted"}},
 		commitIndex: 2,

@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"6.5840/tester1"
 )
 
 func TestRequestVoteRules(t *testing.T) {
@@ -35,6 +37,7 @@ func TestRequestVoteRules(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			deadline := time.Now().Add(-time.Second)
 			rf := &Raft{
+				persister:        tester.MakePersister(),
 				state:            tt.state,
 				currentTerm:      3,
 				votedFor:         tt.votedFor,
@@ -65,7 +68,7 @@ func TestRequestVoteRules(t *testing.T) {
 }
 
 func TestRequestVoteConcurrent(t *testing.T) {
-	rf := &Raft{state: follower, votedFor: -1, log: []LogEntry{{Term: 0}}}
+	rf := &Raft{persister: tester.MakePersister(), state: follower, votedFor: -1, log: []LogEntry{{Term: 0}}}
 	const candidates = 20
 	replies := make([]RequestVoteReply, candidates)
 	var wg sync.WaitGroup
