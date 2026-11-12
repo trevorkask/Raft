@@ -44,6 +44,7 @@ type Raft struct {
 	votedFor          int
 	log               []LogEntry
 	lastIncludedIndex int
+	snapshot          []byte
 	nextIndex         []int
 	matchIndex        []int
 	commitIndex       int
@@ -76,7 +77,7 @@ func (rf *Raft) persist() {
 		e.Encode(rf.log) != nil || e.Encode(rf.lastIncludedIndex) != nil {
 		panic("cannot encode Raft state")
 	}
-	rf.persister.Save(w.Bytes(), nil)
+	rf.persister.Save(w.Bytes(), rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -111,8 +112,19 @@ func (rf *Raft) PersistBytes() int {
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (3D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if index <= rf.lastIncludedIndex || index > rf.lastApplied || index > rf.commitIndex {
+		return
+	}
+	offset := index - rf.lastIncludedIndex
+	entries := make([]LogEntry, len(rf.log)-offset)
+	entries[0].Term = rf.log[offset].Term
+	copy(entries[1:], rf.log[offset+1:])
+	rf.log = entries
+	rf.lastIncludedIndex = index
+	rf.snapshot = append([]byte(nil), snapshot...)
+	rf.persist()
 }
 
 func (rf *Raft) lastLogIndex() int {
@@ -543,6 +555,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.snapshot = persister.ReadSnapshot()
 	rf.resetElectionDeadline()
 
 	// start ticker goroutine to start elections
