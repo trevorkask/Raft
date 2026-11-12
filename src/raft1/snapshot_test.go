@@ -11,6 +11,32 @@ import (
 	"6.5840/tester1"
 )
 
+func TestSnapshotReplyProgress(t *testing.T) {
+	rf := &Raft{persister: tester.MakePersister(), state: leader, currentTerm: 4, votedFor: 0,
+		log: []LogEntry{{Term: 0}}, nextIndex: []int{1, 2}, matchIndex: []int{0, 1}}
+	args := InstallSnapshotArgs{Term: 4, LastIncludedIndex: 5}
+	if rf.handleSnapshotReply(1, &args, &InstallSnapshotReply{Term: 4}) || rf.nextIndex[1] != 2 {
+		t.Fatal("rejected snapshot advanced replication")
+	}
+	if !rf.handleSnapshotReply(1, &args, &InstallSnapshotReply{Term: 4, Success: true}) || rf.nextIndex[1] != 6 || rf.matchIndex[1] != 5 {
+		t.Fatal("accepted snapshot did not advance replication")
+	}
+	args.LastIncludedIndex = 3
+	rf.handleSnapshotReply(1, &args, &InstallSnapshotReply{Term: 4, Success: true})
+	if rf.nextIndex[1] != 6 || rf.matchIndex[1] != 5 {
+		t.Fatal("delayed snapshot reply moved replication backward")
+	}
+	args.Term = 3
+	args.LastIncludedIndex = 7
+	if rf.handleSnapshotReply(1, &args, &InstallSnapshotReply{Term: 3, Success: true}) || rf.matchIndex[1] != 5 {
+		t.Fatal("old leadership reply changed replication progress")
+	}
+	rf.handleSnapshotReply(1, &args, &InstallSnapshotReply{Term: 5})
+	if rf.state != follower || rf.currentTerm != 5 || rf.votedFor != -1 {
+		t.Fatal("higher term reply did not cause step down")
+	}
+}
+
 func TestLocalSnapshot(t *testing.T) {
 	rf := &Raft{
 		persister:   tester.MakePersister(),

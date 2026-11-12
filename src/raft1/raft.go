@@ -326,6 +326,48 @@ func (rf *Raft) broadcastAppendEntries() {
 	}
 }
 
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderId          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term    int
+	Success bool
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	reply.Success = false
+	if args.Term >= rf.currentTerm {
+		rf.becomeFollower(args.Term)
+		rf.resetElectionDeadline()
+	}
+	reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) handleSnapshotReply(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	if reply.Term > rf.currentTerm {
+		rf.becomeFollower(reply.Term)
+		rf.resetElectionDeadline()
+		return false
+	}
+	if rf.state != leader || rf.currentTerm != args.Term || !reply.Success {
+		return false
+	}
+	if args.LastIncludedIndex > rf.matchIndex[peer] {
+		rf.matchIndex[peer] = args.LastIncludedIndex
+	}
+	if args.LastIncludedIndex+1 > rf.nextIndex[peer] {
+		rf.nextIndex[peer] = args.LastIncludedIndex + 1
+	}
+	return true
+}
+
 func (rf *Raft) replicateTo(peer int) {
 	for {
 		rf.mu.Lock()
@@ -335,8 +377,25 @@ func (rf *Raft) replicateTo(peer int) {
 		}
 		next := rf.nextIndex[peer]
 		if next <= rf.lastIncludedIndex {
+			args := InstallSnapshotArgs{
+				Term:              rf.currentTerm,
+				LeaderId:          rf.me,
+				LastIncludedIndex: rf.lastIncludedIndex,
+				LastIncludedTerm:  rf.log[0].Term,
+				Data:              append([]byte(nil), rf.snapshot...),
+			}
 			rf.mu.Unlock()
-			return
+			reply := InstallSnapshotReply{}
+			if !rf.peers[peer].Call("Raft.InstallSnapshot", &args, &reply) {
+				return
+			}
+			rf.mu.Lock()
+			retry := rf.handleSnapshotReply(peer, &args, &reply)
+			rf.mu.Unlock()
+			if !retry {
+				return
+			}
+			continue
 		}
 		args := AppendEntriesArgs{
 			Term:         rf.currentTerm,
