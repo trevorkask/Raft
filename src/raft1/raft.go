@@ -45,6 +45,7 @@ type Raft struct {
 	log               []LogEntry
 	lastIncludedIndex int
 	snapshot          []byte
+	pendingSnapshot   *raftapi.ApplyMsg
 	nextIndex         []int
 	matchIndex        []int
 	commitIndex       int
@@ -343,11 +344,32 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Success = false
-	if args.Term >= rf.currentTerm {
-		rf.becomeFollower(args.Term)
-		rf.resetElectionDeadline()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		return
 	}
+	rf.becomeFollower(args.Term)
+	rf.resetElectionDeadline()
 	reply.Term = rf.currentTerm
+	reply.Success = true
+	if args.LastIncludedIndex <= rf.commitIndex {
+		return
+	}
+	entries := []LogEntry{{Term: args.LastIncludedTerm}}
+	if args.LastIncludedIndex <= rf.lastLogIndex() && rf.termAt(args.LastIncludedIndex) == args.LastIncludedTerm {
+		entries = append(entries, rf.log[args.LastIncludedIndex-rf.lastIncludedIndex+1:]...)
+	}
+	rf.log = entries
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	rf.snapshot = append([]byte(nil), args.Data...)
+	rf.persist()
+	rf.pendingSnapshot = &raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      append([]byte(nil), rf.snapshot...),
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
 }
 
 func (rf *Raft) handleSnapshotReply(peer int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -495,6 +517,14 @@ func (rf *Raft) advanceCommit() {
 func (rf *Raft) applyCommitted() {
 	for {
 		rf.mu.Lock()
+		if rf.pendingSnapshot != nil {
+			msg := *rf.pendingSnapshot
+			rf.pendingSnapshot = nil
+			rf.lastApplied = msg.SnapshotIndex
+			rf.mu.Unlock()
+			rf.applyCh <- msg
+			continue
+		}
 		if rf.lastApplied >= rf.commitIndex {
 			rf.mu.Unlock()
 			return
