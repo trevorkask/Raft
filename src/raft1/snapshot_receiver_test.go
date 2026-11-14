@@ -2,12 +2,53 @@ package raft
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 	"time"
 
 	"6.5840/raftapi"
 	"6.5840/tester1"
 )
+
+func TestSnapshotBehindCommittedEntries(t *testing.T) {
+	for _, index := range []int{1, 2} {
+		rf := &Raft{persister: tester.MakePersister(), currentTerm: 3, votedFor: 0,
+			state: candidate, log: []LogEntry{{Term: 0}, {Term: 2, Command: "first"}, {Term: 3, Command: "second"}},
+			commitIndex: 2, applyCh: make(chan raftapi.ApplyMsg, 3)}
+		wantLog := append([]LogEntry(nil), rf.log...)
+		reply := InstallSnapshotReply{}
+		rf.InstallSnapshot(&InstallSnapshotArgs{Term: 4, LastIncludedIndex: index,
+			LastIncludedTerm: rf.termAt(index), Data: []byte("already committed")}, &reply)
+		if !reply.Success || reply.Term != 4 || rf.state != follower || rf.votedFor != -1 {
+			t.Fatal("snapshot from a new leader did not update the term")
+		}
+		if rf.lastIncludedIndex != 0 || rf.commitIndex != 2 || rf.lastApplied != 0 ||
+			rf.pendingSnapshot != nil || !reflect.DeepEqual(rf.log, wantLog) {
+			t.Fatal("snapshot replaced committed entries waiting for application")
+		}
+		ps := rf.persister.Checkpoint()
+		restarted := &Raft{}
+		restarted.readPersist(ps.ReadRaftState())
+		if restarted.currentTerm != 4 || restarted.votedFor != -1 ||
+			restarted.lastIncludedIndex != 0 || !reflect.DeepEqual(restarted.log, wantLog) || len(ps.ReadSnapshot()) != 0 {
+			t.Fatal("ignored snapshot changed persisted log or lost the new term")
+		}
+		rf.applyCommitted()
+		for i, command := range []string{"first", "second"} {
+			select {
+			case msg := <-rf.applyCh:
+				if !msg.CommandValid || msg.SnapshotValid || msg.CommandIndex != i+1 || msg.Command != command {
+					t.Fatalf("incorrect application after ignored snapshot: %+v", msg)
+				}
+			default:
+				t.Fatal("committed command was lost")
+			}
+		}
+		if len(rf.applyCh) != 0 {
+			t.Fatal("ignored snapshot was delivered to the service")
+		}
+	}
+}
 
 func TestInstallSnapshotState(t *testing.T) {
 	for _, match := range []bool{false, true} {
